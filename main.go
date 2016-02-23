@@ -9,13 +9,18 @@ import (
 	"strings"
 )
 
-const INDENT = "  "
+const (
+	INDENT          = "  "
+	MSG_MACRO       = "msg"
+	DATAPATH_PREFIX = "idx" // Input prefix.
+	PORT_PREFIX     = "p"
+)
 
 // Port returns a string for a port role.
-func Port(num int) string { return fmt.Sprintf("port%d", num) }
+func Port(num int) string { return fmt.Sprintf("%s%d", PORT_PREFIX, num) }
 
 // Datapath returns a string for a datapath role.
-func Datapath(num int) string { return fmt.Sprintf("datapath%d", num) }
+func Datapath(num int) string { return fmt.Sprintf("%s%d", DATAPATH_PREFIX, num) }
 
 func main() {
 	if len(os.Args) < 2 {
@@ -26,11 +31,30 @@ func main() {
 	if err != nil {
 		log.Fatal(err.Error())
 	}
+
 	fmt.Printf("// Input: %d datapaths\n", numDataPath)
-	genScribble(numDataPath)
+
+	scribble, err := os.OpenFile("sched.scr", os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		scribble.Close()
+	}()
+
+	cFile, err := os.OpenFile("sched.c", os.O_WRONLY|os.O_CREATE, 0600)
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		cFile.Close()
+	}()
+
+	scribble.WriteString(genScribble(numDataPath))
+	cFile.WriteString(genSched(numDataPath))
 }
 
-func genScribble(numPorts int) {
+func genScribble(numPorts int) string {
 	ports := make([]int, numPorts)
 	datapaths := make([]int, numPorts)
 	buf := new(bytes.Buffer)
@@ -48,7 +72,7 @@ func genScribble(numPorts int) {
 	buf.WriteString(") {\n")
 	buf.WriteString(genChoices(ports, datapaths, numPorts))
 	buf.WriteString("}\n")
-	fmt.Printf(buf.String())
+	return buf.String()
 }
 
 // genChoiceBody generates choice block bodies given the selected port and
@@ -107,5 +131,55 @@ func genChoices(freePorts, freeDPs []int, totalDatapath int) string {
 
 	buf.WriteString(strings.Repeat(INDENT, totalDatapath-numPorts+1) + "}\n")
 
+	return buf.String()
+}
+
+// genSched generates a scheduler file.
+func genSched(N int) string {
+	buf := new(bytes.Buffer)
+
+	buf.WriteString("#include <stdlib.h>\n") // size_t
+	buf.WriteString(fmt.Sprintf("#define %s%d(DATAPATH,PORT) ((DATAPATH)%%%d==(PORT))\n", MSG_MACRO, N, N))
+
+	baseCond := make([][]string, N) // Base connection pairs.
+	msgPris := make([][]int, N)     // Priorities of each pair.
+
+	for port := 0; port < N; port++ {
+		baseCond[port] = make([]string, N)
+		msgPris[port] = make([]int, N)
+		for priority := 0; priority < N; priority++ {
+			datapath := (port + priority) % N
+			baseCond[port][priority] = fmt.Sprintf("%s%d(%s, %d)", MSG_MACRO, N, Datapath(datapath), port)
+
+			// Assign predefined priority to each port-datapath pair.
+			msgPris[port][datapath] = priority
+		}
+	}
+
+	cond := make([][]string, N)
+	for port := 0; port < N; port++ {
+		cond[port] = make([]string, N)
+		for datapath := 0; datapath < N; datapath++ {
+			cond[port][datapath] = baseCond[port][msgPris[port][datapath]]
+			for priority := msgPris[port][datapath] - 1; priority >= 0; priority-- {
+				cond[port][datapath] += fmt.Sprintf(" && !%s", baseCond[port][priority])
+			}
+		}
+	}
+
+	buf.WriteString(fmt.Sprintf("void sched%d(", N))
+	for i := 0; i < N; i++ {
+		buf.WriteString(fmt.Sprintf("size_t %s, ", Datapath(i)))
+	}
+	buf.WriteString(fmt.Sprintf("int *enabled) {\n"))
+
+	for port := 0; port < N; port++ {
+		for datapath := 0; datapath < N; datapath++ {
+			buf.WriteString(fmt.Sprintf("  enabled[%d * %d + %d] = %s;\n", port, N, datapath, cond[port][datapath]))
+		}
+		buf.WriteString("\n")
+	}
+
+	buf.WriteString("}\n")
 	return buf.String()
 }
