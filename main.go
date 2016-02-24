@@ -64,7 +64,7 @@ func genScribble(numPorts int) string {
 		if i > 0 {
 			buf.WriteString(", ")
 		}
-		buf.WriteString(fmt.Sprintf("role %s, roles %s", Port(i), Datapath(i)))
+		buf.WriteString(fmt.Sprintf("role %s, role %s", Port(i), Datapath(i)))
 		ports[i] = i
 		datapaths[i] = i
 	}
