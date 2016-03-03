@@ -146,8 +146,6 @@ func notMsg(datapath, port, N int) string {
 func genSched(N int) string {
 	buf := new(bytes.Buffer)
 
-	buf.WriteString("#include <stdlib.h>\n") // size_t
-
 	baseCond := make([][]string, N) // Base connection pairs (negated).
 	msgPris := make([][]int, N)     // Priorities of each pair.
 
@@ -176,9 +174,9 @@ func genSched(N int) string {
 
 	buf.WriteString(fmt.Sprintf("void sched%d(", N))
 	for i := 0; i < N; i++ {
-		buf.WriteString(fmt.Sprintf("size_t %s, ", Datapath(i)))
+		buf.WriteString(fmt.Sprintf("unsigned int %s, ", Datapath(i)))
 	}
-	buf.WriteString(fmt.Sprintf("int *enabled) {\n"))
+	buf.WriteString(fmt.Sprintf("int *enabled)\n{\n"))
 
 	for port := 0; port < N; port++ {
 		buf.WriteString(fmt.Sprintf("  enabled[%d] = ", port))
