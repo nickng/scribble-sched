@@ -11,7 +11,6 @@ import (
 
 const (
 	INDENT          = "  "
-	MSG_MACRO       = "msg"
 	DATAPATH_PREFIX = "idx" // Input prefix.
 	PORT_PREFIX     = "p"
 )
@@ -134,14 +133,22 @@ func genChoices(freePorts, freeDPs []int, totalDatapath int) string {
 	return buf.String()
 }
 
+// notMsg is an expression to calculate (datapath % N == port) optimised for H/W
+func notMsg(datapath, port, N int) string {
+	if N > 0 && (port&(port-1) == 0) { // Power of 2
+		return fmt.Sprintf("((%s&%d)^%d)", Datapath(datapath), N-1, port)
+	} else {
+		return fmt.Sprintf("((%s%%%d)^%d)", Datapath(datapath), N, port)
+	}
+}
+
 // genSched generates a scheduler file.
 func genSched(N int) string {
 	buf := new(bytes.Buffer)
 
 	buf.WriteString("#include <stdlib.h>\n") // size_t
-	buf.WriteString(fmt.Sprintf("#define %s%d(DATAPATH,PORT) ((DATAPATH)%%%d==(PORT))\n", MSG_MACRO, N, N))
 
-	baseCond := make([][]string, N) // Base connection pairs.
+	baseCond := make([][]string, N) // Base connection pairs (negated).
 	msgPris := make([][]int, N)     // Priorities of each pair.
 
 	for port := 0; port < N; port++ {
@@ -149,7 +156,7 @@ func genSched(N int) string {
 		msgPris[port] = make([]int, N)
 		for priority := 0; priority < N; priority++ {
 			datapath := (port + priority) % N
-			baseCond[port][priority] = fmt.Sprintf("%s%d(%s, %d)", MSG_MACRO, N, Datapath(datapath), port)
+			baseCond[port][priority] = notMsg(datapath, port, N)
 
 			// Assign predefined priority to each port-datapath pair.
 			msgPris[port][datapath] = priority
@@ -160,9 +167,9 @@ func genSched(N int) string {
 	for port := 0; port < N; port++ {
 		cond[port] = make([]string, N)
 		for datapath := 0; datapath < N; datapath++ {
-			cond[port][datapath] = baseCond[port][msgPris[port][datapath]]
+			cond[port][datapath] = fmt.Sprintf("!(%s)", baseCond[port][msgPris[port][datapath]])
 			for priority := msgPris[port][datapath] - 1; priority >= 0; priority-- {
-				cond[port][datapath] += fmt.Sprintf(" && !%s", baseCond[port][priority])
+				cond[port][datapath] += fmt.Sprintf(" && %s", baseCond[port][priority])
 			}
 		}
 	}
