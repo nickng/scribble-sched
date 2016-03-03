@@ -186,7 +186,7 @@ func genSched(N int) string {
 			if datapath != 0 {
 				buf.WriteString("\n            || ")
 			}
-			buf.WriteString(fmt.Sprintf("%s", cond[port][datapath]))
+			buf.WriteString(fmt.Sprintf("(%s)", cond[port][datapath]))
 		}
 		buf.WriteString(";\n")
 	}
