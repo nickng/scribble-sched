@@ -181,10 +181,14 @@ func genSched(N int) string {
 	buf.WriteString(fmt.Sprintf("int *enabled) {\n"))
 
 	for port := 0; port < N; port++ {
+		buf.WriteString(fmt.Sprintf("  enabled[%d] = ", port))
 		for datapath := 0; datapath < N; datapath++ {
-			buf.WriteString(fmt.Sprintf("  enabled[%d * %d + %d] = %s;\n", port, N, datapath, cond[port][datapath]))
+			if datapath != 0 {
+				buf.WriteString("\n            || ")
+			}
+			buf.WriteString(fmt.Sprintf("%s", cond[port][datapath]))
 		}
-		buf.WriteString("\n")
+		buf.WriteString(";\n")
 	}
 
 	buf.WriteString("}\n")
