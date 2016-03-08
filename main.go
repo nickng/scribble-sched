@@ -57,61 +57,9 @@ func main() {
 		cFile.Close()
 	}()
 
-	scribble.WriteString(genScribble(numDataPath))
-	cFile.WriteString(genSched(numDataPath))
-}
-
-func genScribble(N int) string {
-	buf := new(bytes.Buffer)
-
-	buf.WriteString(fmt.Sprintf("module Sched;\nglobal protocol Sched%d(", N))
-	for i := 0; i < N; i++ {
-		if i > 0 {
-			buf.WriteString(", ")
-		}
-		buf.WriteString(fmt.Sprintf("role %s, role %s", Port(i), Datapath(i)))
-	}
-	buf.WriteString(") {\n") // Protocol block.
-
-	base := make([][]Connection, N)
-	msgPris := make([][]int, N) // Priorities of each pair.
-
-	for port := 0; port < N; port++ {
-		msgPris[port] = make([]int, N)
-		base[port] = make([]Connection, N)
-		for priority := 0; priority < N; priority++ {
-			datapath := (port + priority) % N
-			base[port][priority] = Connection{port: port, datapath: datapath}
-
-			// Assign predefined priority to each port-datapath pair.
-			msgPris[port][datapath] = priority
-		}
-	}
-
-	path := make([]string, N)
-	for port := 0; port < N; port++ {
-		for priority := 0; priority < N; priority++ {
-			datapath := (port + priority) % N
-			path[port] += fmt.Sprintf("choice at %s {\n", Datapath(datapath))
-			path[port] += fmt.Sprintf("  use%d_%d() from %s to %s;\n", datapath, port, Datapath(base[port][msgPris[port][datapath]].datapath), Port(base[port][msgPris[port][datapath]].port))
-			for i := priority; i < N-1; i++ {
-				path[port] += fmt.Sprintf("  T_%d_%d() from %s to %s; // Propagate\n", datapath, port, Datapath(datapath), Datapath((port+(i+1))%N))
-			}
-			path[port] += fmt.Sprintf("} or {\n")
-			path[port] += fmt.Sprintf("  off%d_%d() from %s to %s;\n", datapath, port, Datapath(base[port][msgPris[port][datapath]].datapath), Port(base[port][msgPris[port][datapath]].port))
-			for i := priority; i < N-1; i++ {
-				path[port] += fmt.Sprintf("  F_%d_%d() from %s to %s; // Propagate\n", datapath, port, Datapath(datapath), Datapath((port+(i+1))%N))
-			}
-		}
-		path[port] += fmt.Sprintf("%s\n", strings.Repeat("}", N))
-	}
-
-	for port := 0; port < N; port++ {
-		buf.WriteString(fmt.Sprintf("// Path %d\n%s\n", port, path[port]))
-	}
-
-	buf.WriteString("}\n") // Protocol block.
-	return buf.String()
+	code, protocol := genSched(numDataPath)
+	scribble.WriteString(protocol)
+	cFile.WriteString(code)
 }
 
 // notMsg is an expression to calculate (datapath % N == port) optimised for H/W
@@ -123,27 +71,32 @@ func notMsg(datapath, port, N int) string {
 	}
 }
 
-// genSched generates a scheduler file.
-func genSched(N int) string {
-	buf := new(bytes.Buffer)
+// genSched generates a scheduler file and a protocol.
+func genSched(N int) (string, string) {
+	sched := new(bytes.Buffer)
+	scrib := new(bytes.Buffer)
 
-	buf.WriteString("#include <stdlib.h>\n") // size_t
+	sched.WriteString("#include <stdlib.h>\n") // size_t
 
+	baseConn := make([][]Connection, N)
 	baseCond := make([][]string, N) // Base connection pairs (negated).
 	msgPris := make([][]int, N)     // Priorities of each pair.
 
 	for port := 0; port < N; port++ {
 		baseCond[port] = make([]string, N)
+		baseConn[port] = make([]Connection, N)
 		msgPris[port] = make([]int, N)
 		for priority := 0; priority < N; priority++ {
 			datapath := (port + priority) % N
 			baseCond[port][priority] = notMsg(datapath, port, N)
+			baseConn[port][priority] = Connection{port: port, datapath: datapath}
 
 			// Assign predefined priority to each port-datapath pair.
 			msgPris[port][datapath] = priority
 		}
 	}
 
+	protocol := make([]string, N) // Protocol per port.
 	cond := make([][]string, N)
 	for port := 0; port < N; port++ {
 		cond[port] = make([]string, N)
@@ -153,21 +106,49 @@ func genSched(N int) string {
 				cond[port][datapath] += fmt.Sprintf(" && %s", baseCond[port][priority])
 			}
 		}
+		// choice block nesting based on priority
+		for priority := 0; priority < N; priority++ {
+			datapath := (port + priority) % N
+			protocol[port] += fmt.Sprintf("choice at %s {\n", Datapath(datapath))
+			protocol[port] += fmt.Sprintf("  use%d_%d() from %s to %s;\n", datapath, port, Datapath(baseConn[port][msgPris[port][datapath]].datapath), Port(baseConn[port][msgPris[port][datapath]].port))
+			for i := priority; i < N-1; i++ {
+				protocol[port] += fmt.Sprintf("  T_%d_%d() from %s to %s; // Propagate\n", datapath, port, Datapath(datapath), Datapath((port+(i+1))%N))
+			}
+			protocol[port] += fmt.Sprintf("} or {\n")
+			protocol[port] += fmt.Sprintf("  off%d_%d() from %s to %s;\n", datapath, port, Datapath(baseConn[port][msgPris[port][datapath]].datapath), Port(baseConn[port][msgPris[port][datapath]].port))
+			for i := priority; i < N-1; i++ {
+				protocol[port] += fmt.Sprintf("  F_%d_%d() from %s to %s; // Propagate\n", datapath, port, Datapath(datapath), Datapath((port+(i+1))%N))
+			}
+		}
+		protocol[port] += fmt.Sprintf("%s\n", strings.Repeat("}", N))
 	}
 
-	buf.WriteString(fmt.Sprintf("void sched%d(", N))
+	// Scheduler header.
+	sched.WriteString(fmt.Sprintf("void sched%d(", N))
 	for i := 0; i < N; i++ {
-		buf.WriteString(fmt.Sprintf("size_t %s, ", Datapath(i)))
+		sched.WriteString(fmt.Sprintf("size_t %s, ", Datapath(i)))
 	}
-	buf.WriteString(fmt.Sprintf("int *enabled) {\n"))
+	sched.WriteString(fmt.Sprintf("int *enabled) {\n"))
+
+	// Protocol header.
+	scrib.WriteString(fmt.Sprintf("module Sched;\nglobal protocol Sched%d(", N))
+	for i := 0; i < N; i++ {
+		if i > 0 {
+			scrib.WriteString(", ")
+		}
+		scrib.WriteString(fmt.Sprintf("role %s, role %s", Port(i), Datapath(i)))
+	}
+	scrib.WriteString(") {\n") // Protocol block.
 
 	for port := 0; port < N; port++ {
 		for datapath := 0; datapath < N; datapath++ {
-			buf.WriteString(fmt.Sprintf("  enabled[%d * %d + %d] = %s;\n", port, N, datapath, cond[port][datapath]))
+			sched.WriteString(fmt.Sprintf("  enabled[%d * %d + %d] = %s;\n", port, N, datapath, cond[port][datapath]))
 		}
-		buf.WriteString("\n")
+		sched.WriteString("\n")
+		scrib.WriteString(fmt.Sprintf("// Path %d\n%s\n", port, protocol[port]))
 	}
 
-	buf.WriteString("}\n")
-	return buf.String()
+	sched.WriteString("}\n")
+	scrib.WriteString("}\n")
+	return sched.String(), scrib.String()
 }
