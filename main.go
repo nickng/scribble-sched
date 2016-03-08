@@ -10,10 +10,18 @@ import (
 )
 
 const (
-	INDENT          = "  "
 	DATAPATH_PREFIX = "idx" // Input prefix.
 	PORT_PREFIX     = "p"
 )
+
+type Connection struct {
+	port     int
+	datapath int
+}
+
+func (c Connection) String() string {
+	return fmt.Sprintf("{port: %d, datapath: %d}", c.port, c.datapath)
+}
 
 // Port returns a string for a port role.
 func Port(num int) string { return fmt.Sprintf("%s%d", PORT_PREFIX, num) }
@@ -49,88 +57,9 @@ func main() {
 		cFile.Close()
 	}()
 
-	scribble.WriteString(genScribble(numDataPath))
-	cFile.WriteString(genSched(numDataPath))
-}
-
-func genScribble(numPorts int) string {
-	ports := make([]int, numPorts)
-	datapaths := make([]int, numPorts)
-	buf := new(bytes.Buffer)
-
-	buf.WriteString(fmt.Sprintf("global protocol Sched%d(", numPorts))
-	for i := 0; i < numPorts; i++ {
-		if i > 0 {
-			buf.WriteString(", ")
-		}
-		buf.WriteString(fmt.Sprintf("role %s, role %s", Port(i), Datapath(i)))
-		ports[i] = i
-		datapaths[i] = i
-	}
-
-	buf.WriteString(") {\n")
-	buf.WriteString(genChoices(ports, datapaths, numPorts))
-	buf.WriteString("}\n")
-	return buf.String()
-}
-
-// genChoiceBody generates choice block bodies given the selected port and
-// datapath, with the total number of datapaths available.
-func genChoiceBody(port, datapath, totalDatapath int) string {
-	buf := new(bytes.Buffer)
-	for i := 0; i < totalDatapath; i++ {
-		buf.WriteString(strings.Repeat(INDENT, port+2))
-		var stmt string
-		if datapath == i {
-			stmt = fmt.Sprintf("Use%d_%d() from %s to %s;\n", datapath, port, Port(port), Datapath(i))
-		} else {
-			stmt = fmt.Sprintf("Off%d_%d() from %s to %s;\n", datapath, port, Port(port), Datapath(i))
-		}
-		if _, err := buf.WriteString(stmt); err != nil {
-			log.Fatal(err)
-		}
-	}
-	return buf.String()
-}
-
-// genChoices generates choice blocks (recursively) from the list of free and
-// unused ports/datapaths.
-func genChoices(freePorts, freeDPs []int, totalDatapath int) string {
-	buf := new(bytes.Buffer)
-	numPorts := len(freePorts)
-	numDPs := len(freeDPs)
-
-	if numPorts == 0 || numDPs == 0 {
-		return ""
-	}
-
-	freePortsAfter := make([]int, numPorts-1)
-	copy(freePortsAfter, freePorts[1:])
-	buf.WriteString(strings.Repeat(INDENT, totalDatapath-numPorts+1))
-	buf.WriteString(fmt.Sprintf("choice at %s {\n", Port(freePorts[0])))
-
-	for dp := 0; dp < numDPs; dp++ {
-		freeDPsAfter := make([]int, numDPs)
-		copy(freeDPsAfter, freeDPs)
-		freeDPsAfter = append(freeDPsAfter[:dp], freeDPsAfter[dp+1:]...)
-
-		buf.WriteString(genChoiceBody(freePorts[0], freeDPs[dp], totalDatapath))
-		if numPorts > 1 {
-			buf.WriteString(strings.Repeat(INDENT, totalDatapath-numPorts+2))
-			// Scribble: a message to 'hand over' decision to the next choice-sender
-			buf.WriteString(fmt.Sprintf("Next%d_%d() from %s to %s;\n", freeDPs[dp], freePorts[0], Port(freePorts[0]), Port(freePortsAfter[0])))
-			buf.WriteString(genChoices(freePortsAfter, freeDPsAfter, totalDatapath))
-		}
-
-		// Separator
-		if dp < numDPs-1 {
-			buf.WriteString(strings.Repeat(INDENT, totalDatapath-numPorts+1) + "} or {\n")
-		}
-	}
-
-	buf.WriteString(strings.Repeat(INDENT, totalDatapath-numPorts+1) + "}\n")
-
-	return buf.String()
+	code, protocol := genSched(numDataPath)
+	scribble.WriteString(protocol)
+	cFile.WriteString(code)
 }
 
 // notMsg is an expression to calculate (datapath % N == port) optimised for H/W
@@ -142,25 +71,30 @@ func notMsg(datapath, port, N int) string {
 	}
 }
 
-// genSched generates a scheduler file.
-func genSched(N int) string {
-	buf := new(bytes.Buffer)
+// genSched generates a scheduler file and a protocol.
+func genSched(N int) (string, string) {
+	sched := new(bytes.Buffer)
+	scrib := new(bytes.Buffer)
 
+	baseConn := make([][]Connection, N)
 	baseCond := make([][]string, N) // Base connection pairs (negated).
 	msgPris := make([][]int, N)     // Priorities of each pair.
 
 	for port := 0; port < N; port++ {
 		baseCond[port] = make([]string, N)
+		baseConn[port] = make([]Connection, N)
 		msgPris[port] = make([]int, N)
 		for priority := 0; priority < N; priority++ {
 			datapath := (port + priority) % N
 			baseCond[port][priority] = notMsg(datapath, port, N)
+			baseConn[port][priority] = Connection{port: port, datapath: datapath}
 
 			// Assign predefined priority to each port-datapath pair.
 			msgPris[port][datapath] = priority
 		}
 	}
 
+	protocol := make([]string, N) // Protocol per port.
 	cond := make([][]string, N)
 	for port := 0; port < N; port++ {
 		cond[port] = make([]string, N)
@@ -170,25 +104,54 @@ func genSched(N int) string {
 				cond[port][datapath] += fmt.Sprintf(" && %s", baseCond[port][priority])
 			}
 		}
+		// choice block nesting based on priority
+		for priority := 0; priority < N; priority++ {
+			datapath := (port + priority) % N
+			protocol[port] += fmt.Sprintf("choice at %s {\n", Datapath(datapath))
+			protocol[port] += fmt.Sprintf("  use%d_%d() from %s to %s;\n", datapath, port, Datapath(baseConn[port][msgPris[port][datapath]].datapath), Port(baseConn[port][msgPris[port][datapath]].port))
+			for i := priority; i < N-1; i++ {
+				protocol[port] += fmt.Sprintf("  T_%d_%d() from %s to %s; // Propagate\n", datapath, port, Datapath(datapath), Datapath((port+(i+1))%N))
+			}
+			protocol[port] += fmt.Sprintf("} or {\n")
+			protocol[port] += fmt.Sprintf("  off%d_%d() from %s to %s;\n", datapath, port, Datapath(baseConn[port][msgPris[port][datapath]].datapath), Port(baseConn[port][msgPris[port][datapath]].port))
+			for i := priority; i < N-1; i++ {
+				protocol[port] += fmt.Sprintf("  F_%d_%d() from %s to %s; // Propagate\n", datapath, port, Datapath(datapath), Datapath((port+(i+1))%N))
+			}
+		}
+		protocol[port] += fmt.Sprintf("%s\n", strings.Repeat("}", N))
 	}
 
-	buf.WriteString(fmt.Sprintf("void sched%d(", N))
+	// Scheduler header.
+	sched.WriteString(fmt.Sprintf("void sched%d(", N))
 	for i := 0; i < N; i++ {
-		buf.WriteString(fmt.Sprintf("unsigned int %s, ", Datapath(i)))
+		sched.WriteString(fmt.Sprintf("unsigned int %s, ", Datapath(i)))
 	}
-	buf.WriteString(fmt.Sprintf("int *enabled)\n{\n"))
+	sched.WriteString(fmt.Sprintf("int *enabled)\n{\n"))
+
+	// Protocol header.
+	scrib.WriteString(fmt.Sprintf("module Sched;\nglobal protocol Sched%d(", N))
+	for i := 0; i < N; i++ {
+		if i > 0 {
+			scrib.WriteString(", ")
+		}
+		scrib.WriteString(fmt.Sprintf("role %s, role %s", Port(i), Datapath(i)))
+	}
+	scrib.WriteString(") {\n") // Protocol block.
 
 	for port := 0; port < N; port++ {
-		buf.WriteString(fmt.Sprintf("  enabled[%d] = ", port))
+		sched.WriteString(fmt.Sprintf("  enabled[%d] = ", port))
 		for datapath := 0; datapath < N; datapath++ {
 			if datapath != 0 {
-				buf.WriteString("\n            || ")
+				sched.WriteString("\n            || ")
 			}
-			buf.WriteString(fmt.Sprintf("(%s)", cond[port][datapath]))
+			sched.WriteString(fmt.Sprintf("(%s)", cond[port][datapath]))
 		}
-		buf.WriteString(";\n")
+		sched.WriteString(";\n")
+
+		scrib.WriteString(fmt.Sprintf("// Path %d\n%s\n", port, protocol[port]))
 	}
 
-	buf.WriteString("}\n")
-	return buf.String()
+	sched.WriteString("}\n")
+	scrib.WriteString("}\n")
+	return sched.String(), scrib.String()
 }
